@@ -7,14 +7,56 @@ from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
 from openai import OpenAI
 from flask import Flask, request, jsonify
-
-#region
-#After activating your virtual environment, set your openai key using `$env:OPENAI_API_KEY = 'your_openai_api_key_here'` in the powershel python terminal
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-youtube_api_key = "AIzaSyDyB1vY_cVgdhYAbnmhxukl2jLcOa4Wu84"
-#endregion
+import time
+from google.cloud import secretmanager
+from google.auth import default
 
 app = Flask(__name__)
+
+# Authenticate using default credentials
+credentials, project_id = default()
+if credentials is not None:
+    print(f"Authenticated account: {credentials.service_account_email}")
+else:
+    print("No credentials found.")
+    raise ValueError("Credentials not found")
+
+def access_secret_version(project_id, secret_id, version_id):
+    client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+    name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
+    print(f"NAME>> {name}")
+    response = client.access_secret_version(name=name)
+    payload = response.payload.data.decode("UTF-8")
+    return payload
+
+# Fetch the OpenAI API key from Secret Manager
+secret_id = os.getenv("SECRET_ID")
+version_id = os.getenv("SECRET_VERSION")
+if secret_id is None or version_id is None:
+    print("No Secret ID or Version ID set")
+    raise ValueError("SECRET_ID or SECRET_VERSION environment variables not set")
+    
+openai_api_key = access_secret_version(project_id, secret_id, version_id)
+
+if openai_api_key:
+    print(f"OpenAI API Key successfully retrieved: {openai_api_key[:4]} ...") 
+else:
+    print("OpenAI API Key not found. Please check the environment variable.")
+    raise ValueError("OpenAI API Key not found")
+
+client = OpenAI(api_key=openai_api_key)
+
+# Fetch the YouTube API key from Secret Manager
+secret_youtube_id = os.getenv("SECRET_YOUTUBE_ID")
+if secret_youtube_id is None:
+    raise ValueError("SECRET_YOUTUBE_ID environment variable not set")
+youtube_api_key = access_secret_version(project_id, secret_youtube_id, version_id)
+
+if youtube_api_key:
+    print(f"YouTube API Key successfully retrieved: {youtube_api_key[:4]} ...") 
+else:
+    print("YouTube API Key not found. Please check the environment variable.")
+    raise ValueError("YouTube API Key not found")
 youtube = build('youtube', 'v3', developerKey=youtube_api_key)
 
 def sanitize_filename(filename):
@@ -87,10 +129,11 @@ async def fetch_transcripts_and_analyze(videos, query):
                 transcript_text = "\n".join([f"{t['start']}s - {t['start'] + t['duration']}s: {t['text']}" for t in transcript_list])
 
                 # Save the transcript to a file
-                os.makedirs("transcripts", exist_ok=True)
-                with open(f"transcripts/{sanitized_title}.txt", "w", encoding='utf-8') as file:
+                os.makedirs("/tmp/transcripts", exist_ok=True)
+                with open(f"/tmp/transcripts/{sanitized_title}.txt", "w", encoding='utf-8') as file:
                     file.write(f"Video URL: {video_url}\n\n")
                     file.write(transcript_text)
+
 
                 tasks.append(asyncio.to_thread(analyze_transcript_sync, transcript_text, query))
 
@@ -108,6 +151,7 @@ async def fetch_transcripts_and_analyze(videos, query):
 def search_videos():
     data = request.json
     query = data.get("query")
+    start_time = time.time()  # Record the start time
 
     if not query:
         return jsonify({"error": "Query is required"}), 400
@@ -140,7 +184,8 @@ def search_videos():
                         "text": info['text'],
                         "timestamp": timestamp_link
                     })
-
+        end_time = time.time()  # Record the end time
+        print(f"Time taken: {end_time - start_time} seconds")  # Print the duration   
         return jsonify(results)
     else:
         return jsonify({"message": "No videos found for the query."})
